@@ -1,0 +1,1042 @@
+Option Explicit
+
+'===============================================================
+' SALES DASHBOARD BUILDER - PURPLE THEME
+'
+' Works with the sales workbook structure:
+'   Dataset : raw source data (1,000 rows x 24 columns in sample)
+'   Pivot   : eight PivotTables created by Sales_Dataset_PivotTables.bas
+'   Dashboard : output dashboard created by this module
+'
+' REQUIRED COMPANION MODULE:
+'   Import Sales_Dataset_PivotTables.bas first. This dashboard
+'   refresh calls its public CreateSalesPivotTables procedure so
+'   the Pivot sheet is rebuilt from the latest Dataset records.
+'
+' MAIN MACROS:
+'   BuildSalesDashboard   - first-time build / rebuild
+'   RefreshSalesDashboard - assign this to the dashboard button
+'   AddSalesDashboardButton - recreate the refresh button
+'
+' DATA INTEGRITY:
+'   This module reads Dataset only. It does not change the raw data.
+'===============================================================
+
+Private Const DATA_SHEET As String = "Dataset"
+Private Const PIVOT_SHEET As String = "Pivot"
+Private Const DASHBOARD_SHEET As String = "Dashboard"
+Private Const REFRESH_BUTTON_NAME As String = "btnRefreshSalesDashboard"
+
+
+'---------------------------------------------------------------
+' PUBLIC ENTRY POINTS
+'---------------------------------------------------------------
+Public Sub BuildSalesDashboard()
+    RefreshSalesDashboard
+End Sub
+
+Public Sub RefreshSalesDashboard()
+
+    Dim wb As Workbook
+    Dim wsData As Worksheet
+    Dim wsPvt As Worksheet
+    Dim wsDash As Worksheet
+
+    Dim oldScreenUpdating As Boolean
+    Dim oldEnableEvents As Boolean
+    Dim oldDisplayAlerts As Boolean
+    Dim oldCalculation As XlCalculation
+    Dim errNumber As Long
+    Dim errDescription As String
+
+    On Error GoTo ErrorHandler
+
+    Set wb = ThisWorkbook
+
+    oldScreenUpdating = Application.ScreenUpdating
+    oldEnableEvents = Application.EnableEvents
+    oldDisplayAlerts = Application.DisplayAlerts
+    oldCalculation = Application.Calculation
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "Refreshing sales PivotTables..."
+
+    Set wsData = GetWorksheet(wb, DATA_SHEET)
+    If wsData Is Nothing Then
+        Err.Raise vbObjectError + 2100, "RefreshSalesDashboard", _
+                  "Worksheet 'Dataset' was not found."
+    End If
+
+    ' Rebuild the Pivot sheet from the latest Dataset values.
+    ' This requires Sales_Dataset_PivotTables.bas to be imported.
+    Application.Run "'" & wb.Name & "'!CreateSalesPivotTables"
+    Application.CalculateFull
+
+    Set wsPvt = GetWorksheet(wb, PIVOT_SHEET)
+    If wsPvt Is Nothing Then
+        Err.Raise vbObjectError + 2101, "RefreshSalesDashboard", _
+                  "The Pivot worksheet was not created. Import and run the companion PivotTables module."
+    End If
+
+    ValidateRequiredPivotTables wsPvt
+
+    Set wsDash = GetOrCreateWorksheet(wb, DASHBOARD_SHEET)
+
+    Application.StatusBar = "Building sales dashboard..."
+    RebuildDashboard wsDash, wsData, wsPvt
+
+    wsDash.Activate
+    ActiveWindow.DisplayGridlines = False
+    wsDash.Range("A1").Select
+
+    RestoreApplicationSettings oldScreenUpdating, oldEnableEvents, _
+                              oldDisplayAlerts, oldCalculation
+    Application.StatusBar = False
+
+    MsgBox "Sales dashboard refreshed successfully." & vbCrLf & _
+           "Source: Dataset" & vbCrLf & _
+           "Summaries: 8 PivotTables on Pivot" & vbCrLf & _
+           "Output: Dashboard", _
+           vbInformation, "Dashboard Refresh Complete"
+    Exit Sub
+
+ErrorHandler:
+    errNumber = Err.Number
+    errDescription = Err.Description
+
+    On Error Resume Next
+    RestoreApplicationSettings oldScreenUpdating, oldEnableEvents, _
+                              oldDisplayAlerts, oldCalculation
+    Application.StatusBar = False
+    On Error GoTo 0
+
+    MsgBox "The sales dashboard could not be refreshed." & vbCrLf & vbCrLf & _
+           "Error " & errNumber & ": " & errDescription & vbCrLf & vbCrLf & _
+           "Confirm that Sales_Dataset_PivotTables.bas is imported and that the Dataset headers are unchanged.", _
+           vbCritical, "Sales Dashboard - Error"
+End Sub
+
+Public Sub AddSalesDashboardButton()
+    Dim ws As Worksheet
+    Set ws = GetWorksheet(ThisWorkbook, DASHBOARD_SHEET)
+
+    If ws Is Nothing Then
+        MsgBox "Build the dashboard first by running BuildSalesDashboard.", _
+               vbExclamation, "Dashboard Not Found"
+        Exit Sub
+    End If
+
+    CreateRefreshButton ws
+    MsgBox "The Refresh Dashboard button has been added.", _
+           vbInformation, "Button Created"
+End Sub
+
+'---------------------------------------------------------------
+' REBUILD THE DASHBOARD IN PLACE
+'---------------------------------------------------------------
+Private Sub RebuildDashboard(ByVal wsDash As Worksheet, _
+                             ByVal wsData As Worksheet, _
+                             ByVal wsPvt As Worksheet)
+
+    ClearDashboardOutput wsDash
+    SetupDashboardLayout wsDash
+    BuildDashboardHeader wsDash
+    BuildDashboardKPIs wsDash, wsData
+    CreateDashboardCharts wsDash, wsPvt
+    BuildTopOrdersSection wsDash, wsPvt
+    CreateRefreshButton wsDash
+
+    wsDash.Tab.Color = RGB(94, 59, 183)
+    wsDash.Cells.Font.Name = "Aptos"
+    wsDash.Cells.VerticalAlignment = xlCenter
+End Sub
+
+Private Sub ClearDashboardOutput(ByVal ws As Worksheet)
+    Dim i As Long
+
+    On Error Resume Next
+    For i = ws.ChartObjects.Count To 1 Step -1
+        ws.ChartObjects(i).Delete
+    Next i
+
+    ws.Shapes(REFRESH_BUTTON_NAME).Delete
+    ws.Shapes("btnRefreshDashboard").Delete   ' remove legacy button from supplied macro
+    On Error GoTo 0
+
+    ws.Cells.UnMerge
+    ws.Cells.Clear
+End Sub
+
+'---------------------------------------------------------------
+' DASHBOARD GRID / CANVAS
+'---------------------------------------------------------------
+Private Sub SetupDashboardLayout(ByVal ws As Worksheet)
+    Dim c As Long
+    Dim r As Long
+
+    For c = 1 To 17
+        ws.Columns(c).ColumnWidth = 11.5
+    Next c
+
+    ws.Rows("1:2").RowHeight = 23
+    ws.Rows("3:3").RowHeight = 19
+    ws.Rows("4:4").RowHeight = 8
+    ws.Rows("5:5").RowHeight = 22
+    ws.Rows("6:6").RowHeight = 34
+    ws.Rows("7:7").RowHeight = 7
+    ws.Rows("8:9").RowHeight = 8
+
+    For r = 10 To 43
+        ws.Rows(r).RowHeight = 17
+    Next r
+    ws.Rows("44:44").RowHeight = 24
+    ws.Range("A1:Q60").Interior.Color = RGB(248, 247, 255)
+End Sub
+
+'---------------------------------------------------------------
+' HEADER BANNER + REFRESH TIMESTAMP
+'---------------------------------------------------------------
+Private Sub BuildDashboardHeader(ByVal ws As Worksheet)
+    With ws.Range("A1:N2")
+        .Merge
+        .Value = "SALES PERFORMANCE DASHBOARD"
+        .Interior.Color = RGB(94, 59, 183)
+        .Font.Name = "Aptos Display"
+        .Font.Size = 21
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
+
+    With ws.Range("A3:Q3")
+        .Merge
+        .Value = "Business Intelligence & Sales Analytics     |     Last refreshed: " & _
+                 Format$(Now, "dd-mmm-yyyy hh:mm AM/PM")
+        .Font.Name = "Aptos"
+        .Font.Size = 9
+        .Font.Color = RGB(80, 72, 100)
+        .HorizontalAlignment = xlRight
+        .VerticalAlignment = xlCenter
+    End With
+End Sub
+
+'---------------------------------------------------------------
+' KPI CARDS
+' Metrics are calculated from the Dataset sheet at refresh time.
+' Total Orders and Total Customers are DISTINCT counts.
+' Profit Margin = total profit / total sales (weighted margin).
+'---------------------------------------------------------------
+Private Sub BuildDashboardKPIs(ByVal wsDash As Worksheet, _
+                               ByVal wsData As Worksheet)
+
+    Dim labels(0 To 5) As String
+    Dim formats(0 To 5) As String
+    Dim values(0 To 5) As Variant
+    Dim starts(0 To 5) As Long
+    Dim i As Long
+    Dim c As Long
+    Dim labelRange As Range
+    Dim valueRange As Range
+    Dim baseRange As Range
+
+    CalculateKPIValues wsData, values
+
+    labels(0) = "TOTAL SALES"
+    labels(1) = "TOTAL PROFIT"
+    labels(2) = "TOTAL ORDERS"
+    labels(3) = "TOTAL CUSTOMERS"
+    labels(4) = "QUANTITY SOLD"
+    labels(5) = "PROFIT MARGIN"
+
+    formats(0) = INRNumberFormat()
+    formats(1) = INRNumberFormat()
+    formats(2) = "#,##0"
+    formats(3) = "#,##0"
+    formats(4) = "#,##0"
+    formats(5) = "0.00%"
+
+    starts(0) = 1
+    starts(1) = 4
+    starts(2) = 7
+    starts(3) = 10
+    starts(4) = 13
+    starts(5) = 16
+
+    For i = 0 To 5
+        c = starts(i)
+        Set labelRange = wsDash.Range(wsDash.Cells(5, c), wsDash.Cells(5, c + 1))
+        Set valueRange = wsDash.Range(wsDash.Cells(6, c), wsDash.Cells(6, c + 1))
+        Set baseRange = wsDash.Range(wsDash.Cells(7, c), wsDash.Cells(7, c + 1))
+
+        labelRange.Merge
+        labelRange.Value = labels(i)
+        With labelRange
+            .Interior.Color = RGB(94, 59, 183)
+            .Font.Name = "Aptos"
+            .Font.Size = 9
+            .Font.Bold = True
+            .Font.Color = RGB(255, 255, 255)
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+            ApplyCardBorders labelRange
+        End With
+
+        valueRange.Merge
+        valueRange.Cells(1, 1).Value = values(i)
+        With valueRange
+            .NumberFormat = formats(i)
+            .Interior.Color = RGB(255, 255, 255)
+            .Font.Name = "Aptos Display"
+            .Font.Size = 14
+            .Font.Bold = True
+            .Font.Color = RGB(45, 35, 65)
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+            .ShrinkToFit = True
+            ApplyCardBorders valueRange
+        End With
+
+        baseRange.Merge
+        baseRange.Interior.Color = RGB(210, 205, 230)
+        ApplyCardBorders baseRange
+    Next i
+End Sub
+
+Private Sub ApplyCardBorders(ByVal rng As Range)
+    Dim edge As Variant
+    For Each edge In Array(xlEdgeTop, xlEdgeBottom, xlEdgeLeft, xlEdgeRight)
+        With rng.Borders(edge)
+            .LineStyle = xlContinuous
+            .Weight = xlThin
+            .Color = RGB(60, 30, 130)
+        End With
+    Next edge
+End Sub
+
+Private Sub CalculateKPIValues(ByVal wsData As Worksheet, _
+                               ByRef values() As Variant)
+
+    Dim lastRow As Long
+    Dim colOrder As Long
+    Dim colCustomer As Long
+    Dim colSales As Long
+    Dim colProfit As Long
+    Dim colQuantity As Long
+
+    Dim totalSales As Double
+    Dim totalProfit As Double
+    Dim totalQuantity As Double
+    Dim distinctOrders As Long
+    Dim distinctCustomers As Long
+
+    lastRow = GetLastUsedRow(wsData)
+    If lastRow < 2 Then
+        Err.Raise vbObjectError + 2110, "CalculateKPIValues", _
+                  "Dataset does not contain any transaction records."
+    End If
+
+    colOrder = FindHeaderColumn(wsData, "Order_ID")
+    colCustomer = FindHeaderColumn(wsData, "Customer_ID")
+    colSales = FindHeaderColumn(wsData, "Sales_Amount_INR")
+    colProfit = FindHeaderColumn(wsData, "Profit_INR")
+    colQuantity = FindHeaderColumn(wsData, "Quantity")
+
+    If colOrder = 0 Or colCustomer = 0 Or colSales = 0 Or _
+       colProfit = 0 Or colQuantity = 0 Then
+        Err.Raise vbObjectError + 2111, "CalculateKPIValues", _
+                  "One or more KPI columns are missing. Check Order_ID, Customer_ID, Sales_Amount_INR, Profit_INR and Quantity."
+    End If
+
+    totalSales = SumNumericColumn(wsData, colSales, lastRow)
+    totalProfit = SumNumericColumn(wsData, colProfit, lastRow)
+    totalQuantity = SumNumericColumn(wsData, colQuantity, lastRow)
+    distinctOrders = CountDistinctValues(wsData, colOrder, lastRow)
+    distinctCustomers = CountDistinctValues(wsData, colCustomer, lastRow)
+
+    values(0) = totalSales
+    values(1) = totalProfit
+    values(2) = distinctOrders
+    values(3) = distinctCustomers
+    values(4) = totalQuantity
+
+    If totalSales <> 0 Then
+        values(5) = totalProfit / totalSales
+    Else
+        values(5) = 0
+    End If
+End Sub
+
+Private Function SumNumericColumn(ByVal ws As Worksheet, _
+                                  ByVal columnNumber As Long, _
+                                  ByVal lastRow As Long) As Double
+    Dim r As Long
+    Dim v As Variant
+    Dim total As Double
+
+    For r = 2 To lastRow
+        v = ws.Cells(r, columnNumber).Value2
+        If Not IsError(v) Then
+            If Not IsEmpty(v) Then
+                If IsNumeric(v) Then
+                    If Len(CStr(v)) > 0 Then total = total + CDbl(v)
+                End If
+            End If
+        End If
+    Next r
+
+    SumNumericColumn = total
+End Function
+
+Private Function CountDistinctValues(ByVal ws As Worksheet, _
+                                     ByVal columnNumber As Long, _
+                                     ByVal lastRow As Long) As Long
+    Dim dict As Object
+    Dim r As Long
+    Dim v As Variant
+    Dim key As String
+
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = vbTextCompare
+
+    For r = 2 To lastRow
+        v = ws.Cells(r, columnNumber).Value2
+        If Not IsError(v) And Not IsEmpty(v) Then
+            key = Trim$(CStr(v))
+            If Len(key) > 0 Then
+                If Not dict.Exists(key) Then dict.Add key, True
+            End If
+        End If
+    Next r
+
+    CountDistinctValues = dict.Count
+End Function
+
+'---------------------------------------------------------------
+' CREATE SIX CHARTS FROM THE NAMED PIVOTTABLES.
+' Ranges are resolved from each PivotTable object, not hard-coded
+' worksheet addresses, so the charts follow dynamic Pivot layout.
+'---------------------------------------------------------------
+Private Sub CreateDashboardCharts(ByVal wsDash As Worksheet, _
+                                  ByVal wsPvt As Worksheet)
+
+    Dim left1 As Double, left2 As Double, left3 As Double
+    Dim top1 As Double, top2 As Double
+    Dim chartWidth1 As Double, chartWidth2 As Double, chartWidth3 As Double
+    Dim chartHeight As Double
+    Dim co As ChartObject
+    Dim pt As PivotTable
+
+    left1 = wsDash.Cells(10, 1).Left
+    left2 = wsDash.Cells(10, 7).Left
+    left3 = wsDash.Cells(10, 13).Left
+    top1 = wsDash.Cells(10, 1).Top
+    top2 = wsDash.Cells(27, 1).Top
+
+    chartWidth1 = wsDash.Cells(10, 7).Left - left1 - 8
+    chartWidth2 = wsDash.Cells(10, 13).Left - left2 - 8
+    chartWidth3 = wsDash.Cells(10, 18).Left - left3 - 8
+    chartHeight = wsDash.Cells(25, 1).Top - top1 - 8
+
+    ' 1. Sales by customer segment - doughnut.
+    Set pt = GetPivotTable(wsPvt, "PT_Segment")
+    Set co = AddDashboardChart(wsDash, "dbChartSegment", left1, top1, chartWidth1, chartHeight)
+    With co.Chart
+        .ChartType = xlDoughnut
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionRight
+        AddPivotSeries co.Chart, pt, "Total Sales (INR)", RGB(94, 59, 183), xlDoughnut, False
+        .HasTitle = True
+        .ChartTitle.Text = "Sales by Customer Segment"
+        StyleDashboardChart co.Chart
+        On Error Resume Next
+        .ChartGroups(1).DoughnutHoleSize = 58
+        .SeriesCollection(1).HasDataLabels = True
+        .SeriesCollection(1).DataLabels.ShowPercentage = True
+        .SeriesCollection(1).DataLabels.ShowValue = False
+        .SeriesCollection(1).DataLabels.Font.Size = 8
+        .SeriesCollection(1).Points(1).Interior.Color = RGB(94, 59, 183)
+        .SeriesCollection(1).Points(2).Interior.Color = RGB(197, 90, 240)
+        .SeriesCollection(1).Points(3).Interior.Color = RGB(255, 140, 0)
+        On Error GoTo 0
+    End With
+
+    ' 2. Monthly sales and profit trend - line.
+    Set pt = GetPivotTable(wsPvt, "PT_Trend")
+    Set co = AddDashboardChart(wsDash, "dbChartTrend", left2, top1, chartWidth2, chartHeight)
+    With co.Chart
+        .ChartType = xlLineMarkers
+        AddPivotSeries co.Chart, pt, "Total Sales (INR)", RGB(94, 59, 183), xlLineMarkers, False
+        AddPivotSeries co.Chart, pt, "Total Profit (INR)", RGB(197, 90, 240), xlLineMarkers, False
+        .HasTitle = True
+        .ChartTitle.Text = "Monthly Sales & Profit Trend"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+        StyleDashboardChart co.Chart
+        FormatCurrencyAxis co.Chart, xlPrimary
+    End With
+
+    ' 3. Monthly sales by year - one series per year.
+    Set pt = GetPivotTable(wsPvt, "PT_Monthly")
+    Set co = AddDashboardChart(wsDash, "dbChartMonthly", left3, top1, chartWidth3, chartHeight)
+    With co.Chart
+        .ChartType = xlColumnClustered
+        AddMonthlyYearSeries co.Chart, pt
+        .HasTitle = True
+        .ChartTitle.Text = "Monthly Sales Performance by Year"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+        StyleDashboardChart co.Chart
+        FormatCurrencyAxis co.Chart, xlPrimary
+    End With
+
+    ' 4. Category-wise sales - horizontal bar.
+    Set pt = GetPivotTable(wsPvt, "PT_Category")
+    Set co = AddDashboardChart(wsDash, "dbChartCategory", left1, top2, chartWidth1, chartHeight)
+    With co.Chart
+        .ChartType = xlBarClustered
+        AddPivotSeries co.Chart, pt, "Total Sales (INR)", RGB(197, 90, 240), xlBarClustered, False
+        .HasTitle = True
+        .ChartTitle.Text = "Sales by Product Category"
+        .HasLegend = False
+        StyleDashboardChart co.Chart
+        FormatCurrencyAxis co.Chart, xlPrimary
+        On Error Resume Next
+        .SeriesCollection(1).HasDataLabels = True
+        .SeriesCollection(1).DataLabels.NumberFormat = INRShortNumberFormat()
+        .SeriesCollection(1).DataLabels.Font.Size = 8
+        On Error GoTo 0
+    End With
+
+    ' 5. Region-wise sales and profit - clustered columns.
+    Set pt = GetPivotTable(wsPvt, "PT_Region")
+    Set co = AddDashboardChart(wsDash, "dbChartRegion", left2, top2, chartWidth2, chartHeight)
+    With co.Chart
+        .ChartType = xlColumnClustered
+        AddPivotSeries co.Chart, pt, "Total Sales (INR)", RGB(94, 59, 183), xlColumnClustered, False
+        AddPivotSeries co.Chart, pt, "Total Profit (INR)", RGB(197, 90, 240), xlColumnClustered, False
+        .HasTitle = True
+        .ChartTitle.Text = "Sales & Profit by Region"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+        StyleDashboardChart co.Chart
+        FormatCurrencyAxis co.Chart, xlPrimary
+    End With
+
+    ' 6. Discount impact - sales/profit columns + margin line.
+    Set pt = GetPivotTable(wsPvt, "PT_Discount")
+    Set co = AddDashboardChart(wsDash, "dbChartDiscount", left3, top2, chartWidth3, chartHeight)
+    With co.Chart
+        .ChartType = xlColumnClustered
+        AddPivotSeries co.Chart, pt, "Total Sales (INR)", RGB(94, 59, 183), xlColumnClustered, False
+        AddPivotSeries co.Chart, pt, "Total Profit (INR)", RGB(197, 90, 240), xlColumnClustered, False
+        AddPivotSeries co.Chart, pt, "Average Row Margin", RGB(255, 140, 0), xlLineMarkers, True
+        .HasTitle = True
+        .ChartTitle.Text = "Discount Impact on Sales & Margin"
+        .HasLegend = True
+        .Legend.Position = xlLegendPositionBottom
+        StyleDashboardChart co.Chart
+        FormatCurrencyAxis co.Chart, xlPrimary
+        On Error Resume Next
+        .Axes(xlCategory).TickLabels.NumberFormat = "0%"
+        .Axes(xlValue, xlSecondary).TickLabels.NumberFormat = "0%"
+        .Axes(xlValue, xlSecondary).HasMajorGridlines = False
+        On Error GoTo 0
+    End With
+End Sub
+
+Private Function AddDashboardChart(ByVal ws As Worksheet, _
+                                   ByVal chartName As String, _
+                                   ByVal chartLeft As Double, _
+                                   ByVal chartTop As Double, _
+                                   ByVal chartWidth As Double, _
+                                   ByVal chartHeight As Double) As ChartObject
+
+    Dim co As ChartObject
+
+    Set co = ws.ChartObjects.Add(Left:=chartLeft, Top:=chartTop, _
+                                 Width:=chartWidth, Height:=chartHeight)
+    co.Name = chartName
+    Set AddDashboardChart = co
+End Function
+
+Private Sub AddPivotSeries(ByVal chart As Chart, _
+                           ByVal pt As PivotTable, _
+                           ByVal valueCaption As String, _
+                           ByVal seriesColor As Long, _
+                           ByVal seriesChartType As XlChartType, _
+                           ByVal useSecondaryAxis As Boolean)
+
+    Dim wsPvt As Worksheet
+    Dim valueCol As Long
+    Dim labelCol As Long
+    Dim firstDataRow As Long
+    Dim lastDataRow As Long
+    Dim ser As Series
+
+    Set wsPvt = pt.Parent
+    valueCol = FindPivotColumnByCaption(pt, valueCaption)
+    If valueCol = 0 Then
+        Err.Raise vbObjectError + 2120, "AddPivotSeries", _
+                  "The value field '" & valueCaption & "' was not found in PivotTable '" & pt.Name & "'."
+    End If
+
+    GetPivotDataRows pt, labelCol, firstDataRow, lastDataRow
+    If firstDataRow = 0 Or lastDataRow < firstDataRow Then
+        Err.Raise vbObjectError + 2121, "AddPivotSeries", _
+                  "PivotTable '" & pt.Name & "' does not contain chartable detail rows."
+    End If
+
+    Set ser = chart.SeriesCollection.NewSeries
+    With ser
+        .Name = valueCaption
+        .Values = wsPvt.Range(wsPvt.Cells(firstDataRow, valueCol), _
+                              wsPvt.Cells(lastDataRow, valueCol))
+        .XValues = wsPvt.Range(wsPvt.Cells(firstDataRow, labelCol), _
+                               wsPvt.Cells(lastDataRow, labelCol))
+        On Error Resume Next
+        .ChartType = seriesChartType
+        If useSecondaryAxis Then
+            .AxisGroup = xlSecondary
+        Else
+            .AxisGroup = xlPrimary
+        End If
+        .Format.Fill.ForeColor.RGB = seriesColor
+        .Format.Line.ForeColor.RGB = seriesColor
+        .Format.Line.Weight = 2
+        On Error GoTo 0
+    End With
+End Sub
+
+' PT_Monthly has months in rows and years in columns. The year
+' header row is located dynamically, then the data is loaded into
+' chart series arrays; no fixed Pivot worksheet coordinates used.
+Private Sub AddMonthlyYearSeries(ByVal chart As Chart, ByVal pt As PivotTable)
+
+    Dim rng As Range
+    Dim ws As Worksheet
+    Dim headerRelRow As Long
+    Dim yearCols As Collection
+    Dim monthRows As Collection
+    Dim r As Long, c As Long
+    Dim v As Variant
+    Dim yearValue As Long
+    Dim labels() As Variant
+    Dim values() As Variant
+    Dim i As Long, n As Long
+    Dim yearCol As Variant
+    Dim ser As Series
+    Dim palette As Variant
+    Dim colorIndex As Long
+
+    Set rng = pt.TableRange1
+    Set ws = pt.Parent
+    Set yearCols = New Collection
+    Set monthRows = New Collection
+
+    ' Locate the row containing year column labels (e.g. 2024, 2025).
+    For r = 1 To WorksheetFunction.Min(6, rng.Rows.Count)
+        For c = 2 To rng.Columns.Count
+            v = rng.Cells(r, c).Value2
+            If Not IsError(v) And IsNumeric(v) Then
+                yearValue = CLng(v)
+                If yearValue >= 2000 And yearValue <= 2100 Then
+                    If headerRelRow = 0 Then headerRelRow = r
+                End If
+            End If
+        Next c
+    Next r
+
+    If headerRelRow = 0 Then
+        Err.Raise vbObjectError + 2122, "AddMonthlyYearSeries", _
+                  "Could not locate year columns in PivotTable 'PT_Monthly'. Rebuild the Pivot worksheet first."
+    End If
+
+    For c = 2 To rng.Columns.Count
+        v = rng.Cells(headerRelRow, c).Value2
+        If Not IsError(v) And IsNumeric(v) Then
+            yearValue = CLng(v)
+            If yearValue >= 2000 And yearValue <= 2100 Then yearCols.Add c
+        End If
+    Next c
+
+    ' Find the month rows using the staging Month_Key date serials.
+    For r = headerRelRow + 1 To rng.Rows.Count
+        v = rng.Cells(r, 1).Value2
+        If Not IsError(v) And IsNumeric(v) Then
+            If CDbl(v) > 30000 And CDbl(v) < 60000 Then
+                monthRows.Add r
+            End If
+        End If
+    Next r
+
+    If monthRows.Count = 0 Or yearCols.Count = 0 Then
+        Err.Raise vbObjectError + 2123, "AddMonthlyYearSeries", _
+                  "The monthly PivotTable has no month/year detail rows."
+    End If
+
+    ReDim labels(1 To monthRows.Count)
+    For i = 1 To monthRows.Count
+        r = CLng(monthRows(i))
+        labels(i) = Format$(CDate(rng.Cells(r, 1).Value), "mmm")
+    Next i
+
+    palette = Array(RGB(94, 59, 183), RGB(197, 90, 240), _
+                    RGB(255, 140, 0), RGB(68, 114, 196), RGB(38, 166, 154))
+    colorIndex = 0
+
+    For Each yearCol In yearCols
+        ReDim values(1 To monthRows.Count)
+        For i = 1 To monthRows.Count
+            r = CLng(monthRows(i))
+            v = rng.Cells(r, CLng(yearCol)).Value2
+            If Not IsError(v) And IsNumeric(v) Then
+                values(i) = CDbl(v)
+            Else
+                values(i) = 0
+            End If
+        Next i
+
+        Set ser = chart.SeriesCollection.NewSeries
+        With ser
+            .Name = CStr(CLng(rng.Cells(headerRelRow, CLng(yearCol)).Value2))
+            .XValues = labels
+            .Values = values
+            .ChartType = xlColumnClustered
+            .AxisGroup = xlPrimary
+            .Format.Fill.ForeColor.RGB = palette(colorIndex Mod (UBound(palette) + 1))
+        End With
+        colorIndex = colorIndex + 1
+    Next yearCol
+End Sub
+
+Private Function FindPivotColumnByCaption(ByVal pt As PivotTable, _
+                                          ByVal caption As String) As Long
+    Dim rng As Range
+    Dim r As Long, c As Long
+    Dim v As Variant
+    Dim maxHeaderRows As Long
+
+    Set rng = pt.TableRange1
+    maxHeaderRows = WorksheetFunction.Min(6, rng.Rows.Count)
+
+    For r = 1 To maxHeaderRows
+        For c = 1 To rng.Columns.Count
+            v = rng.Cells(r, c).Value2
+            If Not IsError(v) Then
+                If StrComp(Trim$(CStr(v)), caption, vbTextCompare) = 0 Then
+                    FindPivotColumnByCaption = rng.Column + c - 1
+                    Exit Function
+                End If
+            End If
+        Next c
+    Next r
+
+    FindPivotColumnByCaption = 0
+End Function
+
+Private Sub GetPivotDataRows(ByVal pt As PivotTable, _
+                             ByRef labelCol As Long, _
+                             ByRef firstDataRow As Long, _
+                             ByRef lastDataRow As Long)
+
+    Dim rng As Range
+    Dim r As Long
+    Dim v As Variant
+    Dim labelText As String
+
+    Set rng = pt.TableRange1
+    labelCol = rng.Column
+    firstDataRow = 0
+    lastDataRow = 0
+
+    For r = rng.Row + 1 To rng.Row + rng.Rows.Count - 1
+        v = pt.Parent.Cells(r, labelCol).Value2
+        If IsError(v) Then GoTo ContinueRow
+
+        labelText = Trim$(CStr(v))
+        If Len(labelText) = 0 Then GoTo ContinueRow
+        If StrComp(labelText, "Grand Total", vbTextCompare) = 0 Then Exit For
+        If StrComp(labelText, "Row Labels", vbTextCompare) = 0 Then GoTo ContinueRow
+        If StrComp(labelText, "Column Labels", vbTextCompare) = 0 Then GoTo ContinueRow
+        If StrComp(labelText, "(blank)", vbTextCompare) = 0 Then GoTo ContinueRow
+
+        If firstDataRow = 0 Then firstDataRow = r
+        lastDataRow = r
+ContinueRow:
+    Next r
+End Sub
+
+Private Sub StyleDashboardChart(ByVal chart As Chart)
+    On Error Resume Next
+    chart.ChartArea.Interior.Color = RGB(245, 242, 255)
+    chart.ChartArea.Border.LineStyle = xlContinuous
+    chart.ChartArea.Border.Weight = xlHairline
+    chart.ChartArea.Border.Color = RGB(94, 59, 183)
+    chart.PlotArea.Interior.Color = RGB(255, 255, 255)
+    chart.PlotArea.Border.LineStyle = xlNone
+
+    If chart.HasTitle Then
+        With chart.ChartTitle.Font
+            .Name = "Aptos Display"
+            .Bold = True
+            .Size = 11
+            .Color = RGB(94, 59, 183)
+        End With
+    End If
+
+    chart.Axes(xlValue).HasMajorGridlines = False
+    chart.Axes(xlCategory).HasMajorGridlines = False
+    chart.Axes(xlValue).TickLabels.Font.Size = 8
+    chart.Axes(xlCategory).TickLabels.Font.Size = 8
+    If chart.HasLegend Then chart.Legend.Font.Size = 8
+    chart.ShowAllFieldButtons = False
+    On Error GoTo 0
+End Sub
+
+Private Sub FormatCurrencyAxis(ByVal chart As Chart, ByVal axisGroup As XlAxisGroup)
+    On Error Resume Next
+    chart.Axes(xlValue, axisGroup).TickLabels.NumberFormat = INRShortNumberFormat()
+    On Error GoTo 0
+End Sub
+
+'---------------------------------------------------------------
+' TOP 5 ORDERS TABLE
+' The companion Pivot module exposes Order_ID, Total Sales,
+' Total Profit and Total Quantity in PT_Top5.
+'---------------------------------------------------------------
+Private Sub BuildTopOrdersSection(ByVal wsDash As Worksheet, _
+                                  ByVal wsPvt As Worksheet)
+
+    Dim pt As PivotTable
+    Dim sourceRange As Range
+    Dim destRange As Range
+    Dim titleRange As Range
+    Dim destTopRow As Long
+    Dim r As Long
+
+    Set pt = GetPivotTable(wsPvt, "PT_Top5")
+    Set sourceRange = pt.TableRange1
+
+    destTopRow = 45
+    Set titleRange = wsDash.Range(wsDash.Cells(44, 1), _
+                                  wsDash.Cells(44, sourceRange.Columns.Count))
+    titleRange.Merge
+    titleRange.Value = "TOP 5 ORDERS BY SALES"
+    With titleRange
+        .Interior.Color = RGB(94, 59, 183)
+        .Font.Name = "Aptos Display"
+        .Font.Size = 12
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlCenter
+    End With
+
+    Set destRange = wsDash.Cells(destTopRow, 1).Resize( _
+                       sourceRange.Rows.Count, sourceRange.Columns.Count)
+    destRange.Value2 = sourceRange.Value2
+
+    With destRange
+        .Font.Name = "Aptos"
+        .Font.Size = 9
+        .VerticalAlignment = xlCenter
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(224, 216, 239)
+        .Borders.Weight = xlThin
+    End With
+
+    With destRange.Rows(1)
+        .Interior.Color = RGB(94, 59, 183)
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .HorizontalAlignment = xlCenter
+    End With
+
+    For r = 2 To destRange.Rows.Count
+        If r Mod 2 = 0 Then
+            destRange.Rows(r).Interior.Color = RGB(245, 242, 255)
+        Else
+            destRange.Rows(r).Interior.Color = RGB(255, 255, 255)
+        End If
+    Next r
+
+    If destRange.Columns.Count >= 4 Then
+        wsDash.Range(wsDash.Cells(destTopRow + 1, 2), _
+                     wsDash.Cells(destTopRow + destRange.Rows.Count - 1, 3)).NumberFormat = INRNumberFormat()
+        wsDash.Range(wsDash.Cells(destTopRow + 1, 4), _
+                     wsDash.Cells(destTopRow + destRange.Rows.Count - 1, 4)).NumberFormat = "#,##0"
+    End If
+
+    If destRange.Rows.Count >= 2 Then
+        With destRange.Rows(destRange.Rows.Count)
+            .Font.Bold = True
+            .Interior.Color = RGB(235, 228, 255)
+        End With
+    End If
+
+    destRange.Columns.AutoFit
+    If destRange.Columns.Count > 0 Then
+        If wsDash.Columns(1).ColumnWidth < 16 Then wsDash.Columns(1).ColumnWidth = 16
+    End If
+End Sub
+
+'---------------------------------------------------------------
+' REFRESH BUTTON - placed in the top-right header area
+'---------------------------------------------------------------
+Private Sub CreateRefreshButton(ByVal ws As Worksheet)
+
+    Dim shp As Shape
+    Dim btnLeft As Double
+    Dim btnTop As Double
+    Dim btnWidth As Double
+    Dim btnHeight As Double
+
+    On Error Resume Next
+    ws.Shapes(REFRESH_BUTTON_NAME).Delete
+    On Error GoTo 0
+
+    btnLeft = ws.Cells(1, 15).Left + 3
+    btnTop = ws.Cells(1, 1).Top + 5
+    btnWidth = ws.Cells(1, 18).Left - ws.Cells(1, 15).Left - 6
+    btnHeight = ws.Cells(3, 1).Top - ws.Cells(1, 1).Top - 10
+
+    Set shp = ws.Shapes.AddShape(msoShapeRoundedRectangle, _
+                                 btnLeft, btnTop, btnWidth, btnHeight)
+    With shp
+        .Name = REFRESH_BUTTON_NAME
+        .Fill.ForeColor.RGB = RGB(255, 255, 255)
+        .Fill.Solid
+        .Line.ForeColor.RGB = RGB(94, 59, 183)
+        .Line.Weight = 1.5
+        .TextFrame2.TextRange.Text = "Refresh Dashboard"
+        With .TextFrame2.TextRange.Font
+            .Bold = msoTrue
+            .Size = 9
+            .Fill.ForeColor.RGB = RGB(94, 59, 183)
+        End With
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        .OnAction = "'" & ThisWorkbook.Name & "'!RefreshSalesDashboard"
+        .Placement = xlFreeFloating
+    End With
+End Sub
+
+'---------------------------------------------------------------
+' PIVOT / WORKSHEET HELPERS
+'---------------------------------------------------------------
+Private Sub ValidateRequiredPivotTables(ByVal wsPvt As Worksheet)
+    Dim requiredNames As Variant
+    Dim item As Variant
+    Dim missing As String
+
+    requiredNames = Array("PT_Segment", "PT_Trend", "PT_Monthly", _
+                          "PT_Category", "PT_Region", "PT_Discount", _
+                          "PT_Quantity", "PT_Top5")
+
+    For Each item In requiredNames
+        If Not PivotTableExists(wsPvt, CStr(item)) Then
+            missing = missing & vbCrLf & " - " & CStr(item)
+        End If
+    Next item
+
+    If Len(missing) > 0 Then
+        Err.Raise vbObjectError + 2130, "ValidateRequiredPivotTables", _
+                  "These PivotTables are missing from the Pivot sheet:" & missing
+    End If
+End Sub
+
+Private Function PivotTableExists(ByVal ws As Worksheet, _
+                                   ByVal pivotName As String) As Boolean
+    Dim pt As PivotTable
+    On Error Resume Next
+    Set pt = ws.PivotTables(pivotName)
+    PivotTableExists = Not pt Is Nothing
+    On Error GoTo 0
+End Function
+
+Private Function GetPivotTable(ByVal ws As Worksheet, _
+                               ByVal pivotName As String) As PivotTable
+    On Error Resume Next
+    Set GetPivotTable = ws.PivotTables(pivotName)
+    On Error GoTo 0
+
+    If GetPivotTable Is Nothing Then
+        Err.Raise vbObjectError + 2131, "GetPivotTable", _
+                  "PivotTable '" & pivotName & "' was not found on worksheet '" & ws.Name & "'."
+    End If
+End Function
+
+Private Function GetWorksheet(ByVal wb As Workbook, _
+                              ByVal sheetName As String) As Worksheet
+    On Error Resume Next
+    Set GetWorksheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+End Function
+
+Private Function GetOrCreateWorksheet(ByVal wb As Workbook, _
+                                      ByVal sheetName As String) As Worksheet
+    Dim ws As Worksheet
+
+    Set ws = GetWorksheet(wb, sheetName)
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = sheetName
+    End If
+
+    Set GetOrCreateWorksheet = ws
+End Function
+
+Private Function GetLastUsedRow(ByVal ws As Worksheet) As Long
+    Dim foundCell As Range
+
+    Set foundCell = ws.Cells.Find(What:="*", _
+                                  After:=ws.Cells(1, 1), _
+                                  LookIn:=xlFormulas, _
+                                  LookAt:=xlPart, _
+                                  SearchOrder:=xlByRows, _
+                                  SearchDirection:=xlPrevious, _
+                                  MatchCase:=False)
+    If foundCell Is Nothing Then
+        GetLastUsedRow = 1
+    Else
+        GetLastUsedRow = foundCell.Row
+    End If
+End Function
+
+Private Function FindHeaderColumn(ByVal ws As Worksheet, _
+                                  ByVal headerName As String) As Long
+    Dim lastCol As Long
+    Dim c As Long
+
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    For c = 1 To lastCol
+        If StrComp(Trim$(CStr(ws.Cells(1, c).Value2)), _
+                   headerName, vbTextCompare) = 0 Then
+            FindHeaderColumn = c
+            Exit Function
+        End If
+    Next c
+    FindHeaderColumn = 0
+End Function
+
+Private Function INRNumberFormat() As String
+    INRNumberFormat = Chr$(34) & ChrW(&H20B9) & Chr$(34) & "#,##0.00"
+End Function
+
+Private Function INRShortNumberFormat() As String
+    INRShortNumberFormat = Chr$(34) & ChrW(&H20B9) & Chr$(34) & "#,##0"
+End Function
+
+Private Sub RestoreApplicationSettings(ByVal screenUpdating As Boolean, _
+                                       ByVal enableEvents As Boolean, _
+                                       ByVal displayAlerts As Boolean, _
+                                       ByVal calculation As XlCalculation)
+    Application.ScreenUpdating = screenUpdating
+    Application.EnableEvents = enableEvents
+    Application.DisplayAlerts = displayAlerts
+    Application.Calculation = calculation
+End Sub

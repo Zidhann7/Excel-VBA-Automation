@@ -1,0 +1,457 @@
+Attribute VB_Name = "modFormatSalesDataset"
+Option Explicit
+
+'=============================================================
+' SALES DATASET - NON-DESTRUCTIVE PURPLE FORMATTING MACRO
+'
+' Source worksheet : Dataset
+' Dataset           : 24 columns, headers in row 1
+' Expected range    : A1:X1001 (detected dynamically)
+' Table name        : tblSalesData
+' Table style       : TableStyleMedium13 (purple theme)
+'
+' Button macro      : CleanAndFormatData
+'
+' IMPORTANT:
+' This macro changes formatting and table structure only.
+' It does NOT delete rows/columns, trim text, change case,
+' convert text to dates/numbers, sort data, or rewrite values.
+'=============================================================
+
+Private Const DATA_SHEET As String = "Dataset"
+Private Const TABLE_NAME As String = "tblSalesData"
+Private Const PURPLE_TABLE_STYLE As String = "TableStyleMedium13"
+
+'-------------------------------------------------------------
+' MAIN MACRO - Assign this to the Excel button
+'-------------------------------------------------------------
+Public Sub CleanAndFormatData()
+    Dim ws As Worksheet
+    Dim dataRng As Range
+    Dim tbl As ListObject
+    Dim lastRow As Long
+    Dim lastCol As Long
+
+    Dim oldScreenUpdating As Boolean
+    Dim oldEnableEvents As Boolean
+    Dim oldCalculation As XlCalculation
+    Dim settingsSaved As Boolean
+
+    Dim errNumber As Long
+    Dim errDescription As String
+
+    On Error GoTo ErrorHandler
+
+    Set ws = ThisWorkbook.Worksheets(DATA_SHEET)
+    Set dataRng = GetDatasetRange(ws)
+
+    If dataRng Is Nothing Then
+        Err.Raise vbObjectError + 1000, "CleanAndFormatData", _
+                  "No dataset was found on the 'Dataset' worksheet."
+    End If
+
+    If dataRng.Rows.Count < 2 Then
+        Err.Raise vbObjectError + 1001, "CleanAndFormatData", _
+                  "The dataset must contain a header row and at least one data row."
+    End If
+
+    lastRow = dataRng.Row + dataRng.Rows.Count - 1
+    lastCol = dataRng.Column + dataRng.Columns.Count - 1
+
+    ValidateHeaders ws, lastCol
+    ValidateExpectedColumns ws
+
+    ' Save the current Excel application settings before changing them.
+    oldScreenUpdating = Application.ScreenUpdating
+    oldEnableEvents = Application.EnableEvents
+    oldCalculation = Application.Calculation
+    settingsSaved = True
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+
+    ' Create the table once, or reuse and resize it on later runs.
+    Set tbl = GetOrCreateSalesTable(ws, dataRng)
+
+    ' Apply the purple table style and cell presentation.
+    ApplyPurpleTableFormatting dataRng, tbl
+
+    ' Format known fields by their actual header names.
+    ApplyDatasetNumberFormats ws, lastRow
+    ApplyDatasetColumnWidths ws, lastCol
+
+    ' Freeze the header row for easier scrolling.
+    FreezeDatasetHeader ws
+
+    ' Restore Excel application settings.
+    RestoreApplicationSettings oldScreenUpdating, oldEnableEvents, oldCalculation
+    settingsSaved = False
+
+    MsgBox "Sales dataset formatting completed successfully." & vbCrLf & _
+           Format$(lastRow - 1, "#,##0") & " records formatted across " & _
+           Format$(lastCol, "0") & " columns." & vbCrLf & vbCrLf & _
+           "No source data values were changed.", _
+           vbInformation, "Purple Theme Applied"
+    Exit Sub
+
+ErrorHandler:
+    errNumber = Err.Number
+    errDescription = Err.Description
+
+    On Error Resume Next
+    If settingsSaved Then
+        RestoreApplicationSettings oldScreenUpdating, oldEnableEvents, oldCalculation
+    End If
+    On Error GoTo 0
+
+    MsgBox "The formatting macro could not complete." & vbCrLf & vbCrLf & _
+           "Error " & CStr(errNumber) & ": " & errDescription, _
+           vbExclamation, "Sales Dataset Formatting"
+End Sub
+
+'-------------------------------------------------------------
+' Find the complete used dataset range without relying on
+' column A being fully populated.
+'-------------------------------------------------------------
+Private Function GetDatasetRange(ByVal ws As Worksheet) As Range
+    Dim lastRowCell As Range
+    Dim lastColCell As Range
+
+    Set lastRowCell = ws.Cells.Find(What:="*", _
+                                    After:=ws.Cells(1, 1), _
+                                    LookIn:=xlFormulas, _
+                                    LookAt:=xlPart, _
+                                    SearchOrder:=xlByRows, _
+                                    SearchDirection:=xlPrevious, _
+                                    MatchCase:=False)
+
+    If lastRowCell Is Nothing Then Exit Function
+
+    Set lastColCell = ws.Cells.Find(What:="*", _
+                                    After:=ws.Cells(1, 1), _
+                                    LookIn:=xlFormulas, _
+                                    LookAt:=xlPart, _
+                                    SearchOrder:=xlByColumns, _
+                                    SearchDirection:=xlPrevious, _
+                                    MatchCase:=False)
+
+    If lastColCell Is Nothing Then Exit Function
+
+    ' This workbook's headers begin in A1.
+    Set GetDatasetRange = ws.Range(ws.Cells(1, 1), _
+                                   ws.Cells(lastRowCell.Row, lastColCell.Column))
+End Function
+
+'-------------------------------------------------------------
+' Check that headers are present and unique. This prevents
+' Excel from silently renaming blank or duplicate headers when
+' creating a structured Table.
+'-------------------------------------------------------------
+Private Sub ValidateHeaders(ByVal ws As Worksheet, ByVal lastCol As Long)
+    Dim c As Long
+    Dim j As Long
+    Dim headerText As String
+    Dim previousHeader As String
+
+    For c = 1 To lastCol
+        headerText = Trim$(CStr(ws.Cells(1, c).Value2))
+
+        If Len(headerText) = 0 Then
+            Err.Raise vbObjectError + 1002, "ValidateHeaders", _
+                      "Column " & CStr(c) & " has a blank header. " & _
+                      "Add a unique header before creating the Excel Table."
+        End If
+
+        For j = 1 To c - 1
+            previousHeader = Trim$(CStr(ws.Cells(1, j).Value2))
+            If StrComp(headerText, previousHeader, vbTextCompare) = 0 Then
+                Err.Raise vbObjectError + 1003, "ValidateHeaders", _
+                          "Duplicate column header found: " & headerText
+            End If
+        Next j
+    Next c
+End Sub
+
+'-------------------------------------------------------------
+' Confirm the expected headers in this particular 24-column
+' sales dataset. Extra columns are allowed and are included.
+'-------------------------------------------------------------
+Private Sub ValidateExpectedColumns(ByVal ws As Worksheet)
+    Dim requiredHeaders As Variant
+    Dim item As Variant
+
+    requiredHeaders = Array( _
+        "Order_ID", "Order_Date", "Customer_ID", "Customer_Name", _
+        "Customer_Segment", "Region", "State", "City", _
+        "Sales_Channel", "Product_ID", "Product_Name", "Category", _
+        "Sub_Category", "Quantity", "Unit_Price_INR", "Discount_Pct", _
+        "Sales_Amount_INR", "Cost_Amount_INR", "Profit_INR", _
+        "Profit_Margin_Pct", "Payment_Method", "Order_Status", _
+        "Ship_Date", "Delivery_Days")
+
+    For Each item In requiredHeaders
+        If FindColumn(ws, CStr(item)) = 0 Then
+            Err.Raise vbObjectError + 1004, "ValidateExpectedColumns", _
+                      "Expected column not found: " & CStr(item)
+        End If
+    Next item
+End Sub
+
+'-------------------------------------------------------------
+' Reuse an existing table that overlaps the dataset, or create
+' one. The macro does not unlist or delete existing tables.
+'-------------------------------------------------------------
+Private Function GetOrCreateSalesTable(ByVal ws As Worksheet, _
+                                       ByVal dataRng As Range) As ListObject
+    Dim lo As ListObject
+    Dim candidate As ListObject
+    Dim overlapCount As Long
+
+    For Each lo In ws.ListObjects
+        If Not Intersect(lo.Range, dataRng) Is Nothing Then
+            overlapCount = overlapCount + 1
+            Set candidate = lo
+        End If
+    Next lo
+
+    If overlapCount > 1 Then
+        Err.Raise vbObjectError + 1005, "GetOrCreateSalesTable", _
+                  "More than one existing Excel Table overlaps the dataset. " & _
+                  "Please resolve the overlapping tables first."
+    End If
+
+    If candidate Is Nothing Then
+        If WorkbookTableExists(TABLE_NAME) Then
+            Err.Raise vbObjectError + 1006, "GetOrCreateSalesTable", _
+                      "A table named '" & TABLE_NAME & _
+                      "' already exists on another worksheet."
+        End If
+
+        Set candidate = ws.ListObjects.Add(xlSrcRange, dataRng, , xlYes)
+        candidate.Name = TABLE_NAME
+    Else
+        If StrComp(candidate.Name, TABLE_NAME, vbTextCompare) <> 0 Then
+            If WorkbookTableExists(TABLE_NAME) Then
+                Err.Raise vbObjectError + 1007, "GetOrCreateSalesTable", _
+                          "The required table name '" & TABLE_NAME & _
+                          "' is already used elsewhere in this workbook."
+            End If
+            candidate.Name = TABLE_NAME
+        End If
+
+        candidate.Resize dataRng
+    End If
+
+    candidate.ShowAutoFilter = True
+    candidate.ShowTableStyleRowStripes = True
+    candidate.ShowTableStyleColumnStripes = False
+
+    Set GetOrCreateSalesTable = candidate
+End Function
+
+'-------------------------------------------------------------
+' Check table names across the workbook (table names are
+' workbook-wide unique, not just worksheet-specific).
+'-------------------------------------------------------------
+Private Function WorkbookTableExists(ByVal tableName As String) As Boolean
+    Dim ws As Worksheet
+    Dim lo As ListObject
+
+    For Each ws In ThisWorkbook.Worksheets
+        For Each lo In ws.ListObjects
+            If StrComp(lo.Name, tableName, vbTextCompare) = 0 Then
+                WorkbookTableExists = True
+                Exit Function
+            End If
+        Next lo
+    Next ws
+End Function
+
+'-------------------------------------------------------------
+' Apply purple table style, alignment, fonts and subtle borders.
+'-------------------------------------------------------------
+Private Sub ApplyPurpleTableFormatting(ByVal dataRng As Range, _
+                                       ByVal tbl As ListObject)
+    With tbl
+        .TableStyle = PURPLE_TABLE_STYLE
+        .ShowHeaders = True
+        .ShowTotals = False
+        .ShowAutoFilter = True
+        .ShowTableStyleRowStripes = True
+    End With
+
+    With dataRng
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .Font.Name = "Calibri"
+        .Font.Size = 10
+        .RowHeight = 19
+
+        With .Borders
+            .LineStyle = xlContinuous
+            .Color = RGB(220, 212, 236)
+            .Weight = xlThin
+        End With
+    End With
+
+    With tbl.HeaderRowRange
+        .Interior.Color = RGB(94, 59, 183)
+        .Font.Name = "Calibri"
+        .Font.Size = 11
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .WrapText = True
+        .RowHeight = 30
+    End With
+End Sub
+
+'-------------------------------------------------------------
+' Apply number formats by exact dataset header.
+' These operations change display formats only, not values.
+'-------------------------------------------------------------
+Private Sub ApplyDatasetNumberFormats(ByVal ws As Worksheet, _
+                                      ByVal lastRow As Long)
+    Dim rupeeFormat As String
+    rupeeFormat = ChrW(&H20B9) & "#,##0.00;[Red]-" & _
+                  ChrW(&H20B9) & "#,##0.00"
+
+    SetFormatByHeader ws, lastRow, "Unit_Price_INR", rupeeFormat
+    SetFormatByHeader ws, lastRow, "Sales_Amount_INR", rupeeFormat
+    SetFormatByHeader ws, lastRow, "Cost_Amount_INR", rupeeFormat
+    SetFormatByHeader ws, lastRow, "Profit_INR", rupeeFormat
+
+    SetFormatByHeader ws, lastRow, "Discount_Pct", "0.00%"
+    SetFormatByHeader ws, lastRow, "Profit_Margin_Pct", "0.00%"
+
+    SetFormatByHeader ws, lastRow, "Quantity", "#,##0"
+    SetFormatByHeader ws, lastRow, "Delivery_Days", "#,##0"
+
+    ' Date fields in the supplied dataset are ISO-formatted text
+    ' (for example, 2025-09-17). NumberFormat affects true Excel
+    ' dates only; text dates are intentionally left unchanged so
+    ' that the macro does not rewrite source values.
+    SetFormatByHeader ws, lastRow, "Order_Date", "dd-mmm-yyyy"
+    SetFormatByHeader ws, lastRow, "Ship_Date", "dd-mmm-yyyy"
+End Sub
+
+Private Sub SetFormatByHeader(ByVal ws As Worksheet, _
+                              ByVal lastRow As Long, _
+                              ByVal headerName As String, _
+                              ByVal numberFormat As String)
+    Dim colNum As Long
+
+    colNum = FindColumn(ws, headerName)
+    If colNum = 0 Or lastRow < 2 Then Exit Sub
+
+    ws.Range(ws.Cells(2, colNum), ws.Cells(lastRow, colNum)).NumberFormat = numberFormat
+End Sub
+
+'-------------------------------------------------------------
+' Set widths tailored to the supplied 24-column dataset.
+' Any additional columns are autofitted and capped at 34.
+'-------------------------------------------------------------
+Private Sub ApplyDatasetColumnWidths(ByVal ws As Worksheet, _
+                                     ByVal lastCol As Long)
+    Dim c As Long
+
+    ws.Range(ws.Cells(1, 1), ws.Cells(1, lastCol)).EntireColumn.AutoFit
+
+    For c = 1 To lastCol
+        If ws.Columns(c).ColumnWidth > 34 Then
+            ws.Columns(c).ColumnWidth = 34
+        End If
+    Next c
+
+    SetWidthByHeader ws, "Order_ID", 14
+    SetWidthByHeader ws, "Order_Date", 14
+    SetWidthByHeader ws, "Customer_ID", 13
+    SetWidthByHeader ws, "Customer_Name", 20
+    SetWidthByHeader ws, "Customer_Segment", 18
+    SetWidthByHeader ws, "Region", 12
+    SetWidthByHeader ws, "State", 18
+    SetWidthByHeader ws, "City", 18
+    SetWidthByHeader ws, "Sales_Channel", 16
+    SetWidthByHeader ws, "Product_ID", 12
+    SetWidthByHeader ws, "Product_Name", 30
+    SetWidthByHeader ws, "Category", 18
+    SetWidthByHeader ws, "Sub_Category", 21
+    SetWidthByHeader ws, "Quantity", 11
+    SetWidthByHeader ws, "Unit_Price_INR", 16
+    SetWidthByHeader ws, "Discount_Pct", 14
+    SetWidthByHeader ws, "Sales_Amount_INR", 18
+    SetWidthByHeader ws, "Cost_Amount_INR", 18
+    SetWidthByHeader ws, "Profit_INR", 16
+    SetWidthByHeader ws, "Profit_Margin_Pct", 18
+    SetWidthByHeader ws, "Payment_Method", 21
+    SetWidthByHeader ws, "Order_Status", 16
+    SetWidthByHeader ws, "Ship_Date", 14
+    SetWidthByHeader ws, "Delivery_Days", 14
+End Sub
+
+Private Sub SetWidthByHeader(ByVal ws As Worksheet, _
+                             ByVal headerName As String, _
+                             ByVal columnWidth As Double)
+    Dim colNum As Long
+    colNum = FindColumn(ws, headerName)
+
+    If colNum > 0 Then
+        ws.Columns(colNum).ColumnWidth = columnWidth
+    End If
+End Sub
+
+'-------------------------------------------------------------
+' Find a column from row 1 by case-insensitive header text.
+' The source header cell is never changed.
+'-------------------------------------------------------------
+Private Function FindColumn(ByVal ws As Worksheet, _
+                            ByVal headerName As String) As Long
+    Dim c As Long
+    Dim lastCol As Long
+    Dim currentHeader As String
+
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+    For c = 1 To lastCol
+        currentHeader = Trim$(CStr(ws.Cells(1, c).Value2))
+        If StrComp(currentHeader, Trim$(headerName), vbTextCompare) = 0 Then
+            FindColumn = c
+            Exit Function
+        End If
+    Next c
+End Function
+
+'-------------------------------------------------------------
+' Freeze the first row so headers remain visible when scrolling.
+'-------------------------------------------------------------
+Private Sub FreezeDatasetHeader(ByVal ws As Worksheet)
+    ws.Activate
+
+    If Not ActiveWindow Is Nothing Then
+        ActiveWindow.FreezePanes = False
+        ws.Range("A2").Select
+        ActiveWindow.FreezePanes = True
+        ws.Range("A1").Select
+    End If
+End Sub
+
+'-------------------------------------------------------------
+' Restore Excel settings after success or failure.
+'-------------------------------------------------------------
+Private Sub RestoreApplicationSettings(ByVal screenUpdating As Boolean, _
+                                        ByVal enableEvents As Boolean, _
+                                        ByVal calculationMode As XlCalculation)
+    Application.Calculation = calculationMode
+    Application.EnableEvents = enableEvents
+    Application.ScreenUpdating = screenUpdating
+End Sub
+
+'-------------------------------------------------------------
+' Compatibility macro: assign this if your existing button
+' was previously linked to ApplyPurpleTheme.
+'-------------------------------------------------------------
+Public Sub ApplyPurpleTheme()
+    CleanAndFormatData
+End Sub

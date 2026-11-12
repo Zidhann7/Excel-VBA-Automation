@@ -1,0 +1,731 @@
+Attribute VB_Name = "SalesPivotBuilder"
+Option Explicit
+
+'=============================================================
+' SALES PIVOT TABLE BUILDER - PURPLE THEME
+'
+' Source sheet : Dataset
+' Output sheet : Pivot
+' Staging sheet: _PivotSource (VeryHidden; source data is copied
+'                 here with three helper fields for date analysis)
+'
+' Main macro   : CreateSalesPivotTables
+' Button setup : AddSalesPivotButton
+'
+' IMPORTANT:
+' - The Dataset sheet is read only by this module.
+' - The macro does not edit, delete, sort, or rewrite source data.
+' - ISO date text in Order_Date is parsed only in the hidden
+'   staging copy, so Year/Month PivotTables work reliably.
+'=============================================================
+
+Private Const DATA_SHEET As String = "Dataset"
+Private Const PIVOT_SHEET As String = "Pivot"
+Private Const STAGING_SHEET As String = "_PivotSource"
+
+Private Const FMT_INR As String = """₹""#,##0.00"
+Private Const FMT_PERCENT As String = "0.00%"
+Private Const FMT_INTEGER As String = "#,##0"
+
+'-------------------------------------------------------------
+' MAIN MACRO - assign this to the button
+'-------------------------------------------------------------
+Public Sub CreateSalesPivotTables()
+
+    Dim wb As Workbook
+    Dim wsData As Worksheet
+    Dim wsPvt As Worksheet
+    Dim wsStage As Worksheet
+    Dim sourceRange As Range
+    Dim stageRange As Range
+    Dim pivotCache As PivotCache
+    Dim pt As PivotTable
+
+    Dim sourceValues As Variant
+    Dim stageValues() As Variant
+    Dim lastRow As Long
+    Dim lastCol As Long
+    Dim orderDateCol As Long
+    Dim stageLastCol As Long
+    Dim startCol As Long
+    Dim r As Long
+    Dim c As Long
+    Dim parsedDate As Date
+
+    Dim oldScreenUpdating As Boolean
+    Dim oldEnableEvents As Boolean
+    Dim oldDisplayAlerts As Boolean
+    Dim oldCalculation As XlCalculation
+
+    Dim errNumber As Long
+    Dim errDescription As String
+
+    On Error GoTo ErrorHandler
+
+    Set wb = ThisWorkbook
+
+    ' Preserve current Excel application settings.
+    oldScreenUpdating = Application.ScreenUpdating
+    oldEnableEvents = Application.EnableEvents
+    oldDisplayAlerts = Application.DisplayAlerts
+    oldCalculation = Application.Calculation
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+
+    ' Locate and validate the source worksheet.
+    Set wsData = GetWorksheet(wb, DATA_SHEET)
+    If wsData Is Nothing Then
+        Err.Raise vbObjectError + 1000, "CreateSalesPivotTables", _
+                  "Worksheet '" & DATA_SHEET & "' was not found."
+    End If
+
+    lastRow = GetLastUsedRow(wsData)
+    lastCol = GetLastUsedColumn(wsData)
+
+    If lastRow < 2 Or lastCol < 1 Then
+        Err.Raise vbObjectError + 1001, "CreateSalesPivotTables", _
+                  "The Dataset worksheet does not contain a header row and data records."
+    End If
+
+    Set sourceRange = wsData.Range(wsData.Cells(1, 1), wsData.Cells(lastRow, lastCol))
+
+    ' Validate every field used by the PivotTables.
+    ValidateRequiredHeaders wsData, lastCol
+
+    orderDateCol = FindHeaderColumn(wsData, "Order_Date")
+    If orderDateCol = 0 Then
+        Err.Raise vbObjectError + 1002, "CreateSalesPivotTables", _
+                  "Required column 'Order_Date' was not found."
+    End If
+
+    ' Get or create the output and staging worksheets.
+    Set wsPvt = GetOrCreateWorksheet(wb, PIVOT_SHEET)
+    Set wsStage = GetOrCreateWorksheet(wb, STAGING_SHEET)
+
+    ' Remove previous PivotTables and output from the Pivot sheet.
+    ClearPivotOutput wsPvt
+
+    ' Create a staging copy. Original Dataset values remain untouched.
+    sourceValues = sourceRange.Value2
+    stageLastCol = lastCol + 3
+    ReDim stageValues(1 To lastRow, 1 To stageLastCol)
+
+    For r = 1 To lastRow
+        For c = 1 To lastCol
+            stageValues(r, c) = sourceValues(r, c)
+        Next c
+    Next r
+
+    ' Add helper headers used for reliable date analysis.
+    stageValues(1, lastCol + 1) = "Order_Year"
+    stageValues(1, lastCol + 2) = "Order_Month_Date"
+    stageValues(1, lastCol + 3) = "Month_Key"
+
+    ' Parse Order_Date in the staging copy only.
+    ' Order_Month_Date = first day of each transaction month.
+    ' Month_Key = month number represented as a date in year 2000,
+    ' allowing month names to sort Jan-Dec in the monthly matrix.
+    For r = 2 To lastRow
+        If TryParseDate(sourceValues(r, orderDateCol), parsedDate) Then
+            stageValues(r, lastCol + 1) = Year(parsedDate)
+            stageValues(r, lastCol + 2) = DateSerial(Year(parsedDate), Month(parsedDate), 1)
+            stageValues(r, lastCol + 3) = DateSerial(2000, Month(parsedDate), 1)
+        Else
+            stageValues(r, lastCol + 1) = Empty
+            stageValues(r, lastCol + 2) = Empty
+            stageValues(r, lastCol + 3) = Empty
+        End If
+    Next r
+
+    wsStage.Cells.Clear
+    wsStage.Range(wsStage.Cells(1, 1), wsStage.Cells(lastRow, stageLastCol)).Value2 = stageValues
+    wsStage.Columns(lastCol + 2).NumberFormat = "mmm yyyy"
+    wsStage.Columns(lastCol + 3).NumberFormat = "mmmm"
+
+    ' A worksheet cannot be hidden while it is active.
+    If ActiveSheet.Name = wsStage.Name Then wsPvt.Activate
+    wsStage.Visible = xlSheetVeryHidden
+
+    Set stageRange = wsStage.Range(wsStage.Cells(1, 1), wsStage.Cells(lastRow, stageLastCol))
+
+    ' Build one shared PivotCache for all eight PivotTables.
+    Set pivotCache = wb.PivotCaches.Create( _
+        SourceType:=xlDatabase, _
+        SourceData:=stageRange.Address(ReferenceStyle:=xlR1C1, External:=True))
+
+    startCol = 1
+
+    '=========================================================
+    ' 1. SALES BY CUSTOMER SEGMENT
+    '=========================================================
+    Set pt = CreateBasePivot(pivotCache, wsPvt, startCol, "PT_Segment")
+    With pt
+        .PivotFields("Customer_Segment").Orientation = xlRowField
+        .PivotFields("Customer_Segment").Position = 1
+
+        AddPivotDataField pt, "Sales_Amount_INR", "Total Sales (INR)", xlSum, FMT_INR
+        AddPivotDataField pt, "Profit_INR", "Total Profit (INR)", xlSum, FMT_INR
+    End With
+    FinalizePivot wsPvt, pt, "Sales by Customer Segment"
+    startCol = NextPivotColumn(pt)
+
+    '=========================================================
+    ' 2. MONTHLY SALES AND PROFIT TREND
+    '=========================================================
+    Set pt = CreateBasePivot(pivotCache, wsPvt, startCol, "PT_Trend")
+    With pt
+        .PivotFields("Order_Month_Date").Orientation = xlRowField
+        .PivotFields("Order_Month_Date").Position = 1
+        .PivotFields("Order_Month_Date").NumberFormat = "mmm yyyy"
+
+        AddPivotDataField pt, "Sales_Amount_INR", "Total Sales (INR)", xlSum, FMT_INR
+        AddPivotDataField pt, "Profit_INR", "Total Profit (INR)", xlSum, FMT_INR
+    End With
+    FinalizePivot wsPvt, pt, "Monthly Sales & Profit Trend"
+    startCol = NextPivotColumn(pt)
+
+    '=========================================================
+    ' 3. MONTHLY SALES PERFORMANCE BY YEAR
+    '=========================================================
+    Set pt = CreateBasePivot(pivotCache, wsPvt, startCol, "PT_Monthly")
+    With pt
+        .PivotFields("Month_Key").Orientation = xlRowField
+        .PivotFields("Month_Key").Position = 1
+        .PivotFields("Month_Key").NumberFormat = "mmmm"
+
+        .PivotFields("Order_Year").Orientation = xlColumnField
+        .PivotFields("Order_Year").Position = 1
+        .PivotFields("Order_Year").NumberFormat = "0"
+
+        AddPivotDataField pt, "Sales_Amount_INR", "Total Sales (INR)", xlSum, FMT_INR
+    End With
+    FinalizePivot wsPvt, pt, "Monthly Sales by Year"
+    startCol = NextPivotColumn(pt)
+
+    '=========================================================
+    ' 4. CATEGORY-WISE SALES AND PROFIT
+    '=========================================================
+    Set pt = CreateBasePivot(pivotCache, wsPvt, startCol, "PT_Category")
+    With pt
+        .PivotFields("Category").Orientation = xlRowField
+        .PivotFields("Category").Position = 1
+
+        AddPivotDataField pt, "Sales_Amount_INR", "Total Sales (INR)", xlSum, FMT_INR
+        AddPivotDataField pt, "Profit_INR", "Total Profit (INR)", xlSum, FMT_INR
+    End With
+    FinalizePivot wsPvt, pt, "Sales & Profit by Category"
+    startCol = NextPivotColumn(pt)
+
+    '=========================================================
+    ' 5. REGION-WISE SALES AND PROFIT
+    '=========================================================
+    Set pt = CreateBasePivot(pivotCache, wsPvt, startCol, "PT_Region")
+    With pt
+        .PivotFields("Region").Orientation = xlRowField
+        .PivotFields("Region").Position = 1
+
+        AddPivotDataField pt, "Sales_Amount_INR", "Total Sales (INR)", xlSum, FMT_INR
+        AddPivotDataField pt, "Profit_INR", "Total Profit (INR)", xlSum, FMT_INR
+    End With
+    FinalizePivot wsPvt, pt, "Sales & Profit by Region"
+    startCol = NextPivotColumn(pt)
+
+    '=========================================================
+    ' 6. DISCOUNT IMPACT ANALYSIS
+    '=========================================================
+    Set pt = CreateBasePivot(pivotCache, wsPvt, startCol, "PT_Discount")
+    With pt
+        .PivotFields("Discount_Pct").Orientation = xlRowField
+        .PivotFields("Discount_Pct").Position = 1
+        .PivotFields("Discount_Pct").NumberFormat = "0%"
+
+        AddPivotDataField pt, "Sales_Amount_INR", "Total Sales (INR)", xlSum, FMT_INR
+        AddPivotDataField pt, "Profit_INR", "Total Profit (INR)", xlSum, FMT_INR
+        AddPivotDataField pt, "Profit_Margin_Pct", "Average Row Margin", xlAverage, FMT_PERCENT
+    End With
+    FinalizePivot wsPvt, pt, "Discount Impact on Sales & Profit"
+    startCol = NextPivotColumn(pt)
+
+    '=========================================================
+    ' 7. QUANTITY SOLD BY CUSTOMER SEGMENT
+    '=========================================================
+    Set pt = CreateBasePivot(pivotCache, wsPvt, startCol, "PT_Quantity")
+    With pt
+        .PivotFields("Customer_Segment").Orientation = xlRowField
+        .PivotFields("Customer_Segment").Position = 1
+
+        AddPivotDataField pt, "Quantity", "Total Quantity Sold", xlSum, FMT_INTEGER
+    End With
+    FinalizePivot wsPvt, pt, "Quantity Sold by Customer Segment"
+    startCol = NextPivotColumn(pt)
+
+    '=========================================================
+    ' 8. TOP 5 ORDERS BY SALES AMOUNT
+    '=========================================================
+    Set pt = CreateBasePivot(pivotCache, wsPvt, startCol, "PT_Top5")
+    With pt
+        .PivotFields("Order_ID").Orientation = xlRowField
+        .PivotFields("Order_ID").Position = 1
+
+        AddPivotDataField pt, "Sales_Amount_INR", "Total Sales (INR)", xlSum, FMT_INR
+        AddPivotDataField pt, "Profit_INR", "Total Profit (INR)", xlSum, FMT_INR
+        AddPivotDataField pt, "Quantity", "Total Quantity", xlSum, FMT_INTEGER
+    End With
+
+    pt.ManualUpdate = False
+    pt.RefreshTable
+    ApplyTopNFilter pt, "Order_ID", 5
+    FinalizePivot wsPvt, pt, "Top 5 Orders by Sales"
+
+    ' Overall worksheet formatting.
+    With wsPvt.UsedRange
+        .Font.Name = "Aptos"
+        .Font.Size = 10
+        .VerticalAlignment = xlCenter
+    End With
+
+    wsPvt.Rows(1).RowHeight = 24
+    wsPvt.UsedRange.Columns.AutoFit
+    CapPivotColumnWidths wsPvt, 30
+
+    ' Freeze the title row.
+    wsPvt.Activate
+    ActiveWindow.FreezePanes = False
+    wsPvt.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+    wsPvt.Range("A1").Select
+
+    ' Restore Excel settings and notify the user.
+    RestoreApplicationSettings oldScreenUpdating, oldEnableEvents, _
+                              oldDisplayAlerts, oldCalculation
+
+    MsgBox "Eight sales PivotTables were created successfully." & vbCrLf & _
+           "Source: Dataset (" & Format$(lastRow - 1, "#,##0") & " records)" & vbCrLf & _
+           "Output: Pivot" & vbCrLf & _
+           "The original Dataset sheet was not modified.", _
+           vbInformation, "Sales PivotTables Complete"
+    Exit Sub
+
+ErrorHandler:
+    errNumber = Err.Number
+    errDescription = Err.Description
+
+    On Error Resume Next
+    RestoreApplicationSettings oldScreenUpdating, oldEnableEvents, _
+                              oldDisplayAlerts, oldCalculation
+    On Error GoTo 0
+
+    MsgBox "The PivotTables could not be completed." & vbCrLf & vbCrLf & _
+           "Error " & errNumber & ": " & errDescription, _
+           vbCritical, "Sales PivotTables - Error"
+End Sub
+
+
+'-------------------------------------------------------------
+' BACKWARD-COMPATIBLE ENTRY POINT
+' Existing buttons assigned to CreatePivotSheets will still work.
+'-------------------------------------------------------------
+Public Sub CreatePivotSheets()
+    CreateSalesPivotTables
+End Sub
+
+'-------------------------------------------------------------
+' CREATE A PIVOTTABLE AT THE REQUESTED OUTPUT COLUMN
+'-------------------------------------------------------------
+Private Function CreateBasePivot(ByVal pc As PivotCache, _
+                                 ByVal wsPvt As Worksheet, _
+                                 ByVal startCol As Long, _
+                                 ByVal pivotName As String) As PivotTable
+
+    Dim pt As PivotTable
+
+    Set pt = pc.CreatePivotTable( _
+        TableDestination:=wsPvt.Cells(2, startCol), _
+        TableName:=pivotName)
+
+    pt.ManualUpdate = True
+    pt.RowGrand = True
+    pt.ColumnGrand = True
+    pt.DisplayErrorString = True
+    pt.ErrorString = "-"
+    pt.NullString = "-"
+
+    Set CreateBasePivot = pt
+End Function
+
+'-------------------------------------------------------------
+' ADD A DATA FIELD AND APPLY ITS NUMBER FORMAT
+'-------------------------------------------------------------
+Private Sub AddPivotDataField(ByVal pt As PivotTable, _
+                              ByVal sourceField As String, _
+                              ByVal displayCaption As String, _
+                              ByVal summaryFunction As XlConsolidationFunction, _
+                              ByVal numberFormat As String)
+
+    Dim dataField As PivotField
+
+    Set dataField = pt.AddDataField( _
+        pt.PivotFields(sourceField), displayCaption, summaryFunction)
+
+    dataField.NumberFormat = numberFormat
+End Sub
+
+'-------------------------------------------------------------
+' APPLY PIVOT FORMATTING AND WRITE A TITLE ABOVE THE TABLE
+'-------------------------------------------------------------
+Private Sub FinalizePivot(ByVal wsPvt As Worksheet, _
+                          ByVal pt As PivotTable, _
+                          ByVal titleText As String)
+
+    Dim titleRange As Range
+    Dim firstCol As Long
+    Dim lastCol As Long
+
+    pt.ManualUpdate = False
+    pt.RefreshTable
+
+    On Error Resume Next
+    pt.TableStyle2 = "PivotStyleMedium13"
+    pt.ShowTableStyleRowStripes = True
+    pt.ShowTableStyleColumnStripes = False
+    pt.DisplayFieldCaptions = True
+    pt.RowAxisLayout xlTabularRow
+    pt.RepeatAllLabels xlRepeatLabels
+    On Error GoTo 0
+
+    firstCol = pt.TableRange2.Column
+    lastCol = firstCol + pt.TableRange2.Columns.Count - 1
+
+    Set titleRange = wsPvt.Range(wsPvt.Cells(1, firstCol), wsPvt.Cells(1, lastCol))
+
+    If titleRange.MergeCells Then titleRange.UnMerge
+    titleRange.Merge
+    titleRange.Cells(1, 1).Value = titleText
+
+    With titleRange
+        .Interior.Color = RGB(94, 59, 183)
+        .Font.Name = "Aptos Display"
+        .Font.Bold = True
+        .Font.Size = 11
+        .Font.Color = RGB(255, 255, 255)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .Borders(xlEdgeBottom).LineStyle = xlContinuous
+        .Borders(xlEdgeBottom).Color = RGB(214, 199, 242)
+        .Borders(xlEdgeBottom).Weight = xlThin
+    End With
+
+    With pt.TableRange2
+        .VerticalAlignment = xlCenter
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(224, 216, 239)
+        .Borders.Weight = xlThin
+    End With
+
+    wsPvt.Rows(1).RowHeight = 24
+End Sub
+
+'-------------------------------------------------------------
+' RETURN THE FIRST COLUMN AFTER A PIVOTTABLE PLUS ONE GAP COLUMN
+'-------------------------------------------------------------
+Private Function NextPivotColumn(ByVal pt As PivotTable) As Long
+    NextPivotColumn = pt.TableRange2.Column + pt.TableRange2.Columns.Count + 1
+End Function
+
+'-------------------------------------------------------------
+' APPLY A TOP-N FILTER AND SORT THE ORDERS BY SALES DESCENDING
+'-------------------------------------------------------------
+Private Sub ApplyTopNFilter(ByVal pt As PivotTable, _
+                            ByVal rowFieldName As String, _
+                            ByVal topCount As Long)
+
+    Dim rowField As PivotField
+
+    Set rowField = pt.PivotFields(rowFieldName)
+
+    On Error Resume Next
+    rowField.PivotFilters.Add2 Type:=xlTopCount, _
+                               DataField:=pt.DataFields(1), _
+                               Value1:=topCount
+
+    If Err.Number <> 0 Then
+        Err.Clear
+        rowField.PivotFilters.Add Type:=xlTopCount, _
+                                  DataField:=pt.DataFields(1), _
+                                  Value1:=topCount
+    End If
+    On Error GoTo 0
+
+    On Error Resume Next
+    rowField.AutoSort xlDescending, pt.DataFields(1).Name
+    On Error GoTo 0
+End Sub
+
+'-------------------------------------------------------------
+' CLEAR PREVIOUS OUTPUT FROM THE PIVOT WORKSHEET
+'-------------------------------------------------------------
+Private Sub ClearPivotOutput(ByVal wsPvt As Worksheet)
+
+    Dim i As Long
+
+    On Error Resume Next
+
+    For i = wsPvt.PivotTables.Count To 1 Step -1
+        wsPvt.PivotTables(i).TableRange2.Clear
+    Next i
+
+    wsPvt.Cells.UnMerge
+    wsPvt.Cells.Clear
+
+    On Error GoTo 0
+End Sub
+
+'-------------------------------------------------------------
+' VALIDATE THE SOURCE HEADERS USED BY THE PIVOTTABLES
+'-------------------------------------------------------------
+Private Sub ValidateRequiredHeaders(ByVal ws As Worksheet, ByVal lastCol As Long)
+
+    Dim requiredFields As Variant
+    Dim fieldName As Variant
+    Dim missingFields As String
+
+    requiredFields = Array( _
+        "Order_ID", _
+        "Order_Date", _
+        "Customer_ID", _
+        "Customer_Segment", _
+        "Region", _
+        "Category", _
+        "Quantity", _
+        "Discount_Pct", _
+        "Sales_Amount_INR", _
+        "Profit_INR", _
+        "Profit_Margin_Pct")
+
+    For Each fieldName In requiredFields
+        If FindHeaderColumn(ws, CStr(fieldName)) = 0 Then
+            missingFields = missingFields & vbCrLf & " - " & CStr(fieldName)
+        End If
+    Next fieldName
+
+    If Len(missingFields) > 0 Then
+        Err.Raise vbObjectError + 1003, "ValidateRequiredHeaders", _
+                  "These required columns are missing from Dataset:" & missingFields
+    End If
+End Sub
+
+'-------------------------------------------------------------
+' FIND A COLUMN BY ITS EXACT HEADER (CASE-INSENSITIVE)
+'-------------------------------------------------------------
+Private Function FindHeaderColumn(ByVal ws As Worksheet, _
+                                  ByVal headerName As String) As Long
+
+    Dim c As Long
+    Dim lastCol As Long
+    Dim currentHeader As String
+
+    lastCol = GetLastUsedColumn(ws)
+
+    For c = 1 To lastCol
+        currentHeader = Trim$(CStr(ws.Cells(1, c).Value2))
+        If StrComp(currentHeader, headerName, vbTextCompare) = 0 Then
+            FindHeaderColumn = c
+            Exit Function
+        End If
+    Next c
+
+    FindHeaderColumn = 0
+End Function
+
+'-------------------------------------------------------------
+' PARSE A DATE VALUE, INCLUDING ISO TEXT SUCH AS 2025-09-17
+'-------------------------------------------------------------
+Private Function TryParseDate(ByVal valueIn As Variant, _
+                              ByRef parsedDate As Date) As Boolean
+
+    Dim s As String
+    Dim y As Long
+    Dim m As Long
+    Dim d As Long
+
+    On Error GoTo ParseFailed
+
+    If IsError(valueIn) Or IsEmpty(valueIn) Then GoTo ParseFailed
+
+    s = Trim$(CStr(valueIn))
+
+    ' Parse ISO yyyy-mm-dd explicitly to avoid regional date ambiguity.
+    If Len(s) >= 10 Then
+        If Mid$(s, 5, 1) = "-" And Mid$(s, 8, 1) = "-" Then
+            y = CLng(Left$(s, 4))
+            m = CLng(Mid$(s, 6, 2))
+            d = CLng(Mid$(s, 9, 2))
+
+            parsedDate = DateSerial(y, m, d)
+
+            If Year(parsedDate) = y And Month(parsedDate) = m And Day(parsedDate) = d Then
+                TryParseDate = True
+                Exit Function
+            End If
+        End If
+    End If
+
+    ' Fallback for genuine Excel dates or other recognizable date values.
+    If IsDate(valueIn) Then
+        parsedDate = CDate(valueIn)
+        TryParseDate = True
+        Exit Function
+    End If
+
+ParseFailed:
+    TryParseDate = False
+End Function
+
+'-------------------------------------------------------------
+' FIND LAST USED ROW / COLUMN WITHOUT ASSUMING COLUMN A IS COMPLETE
+'-------------------------------------------------------------
+Private Function GetLastUsedRow(ByVal ws As Worksheet) As Long
+
+    Dim foundCell As Range
+
+    Set foundCell = ws.Cells.Find( _
+        What:="*", _
+        After:=ws.Cells(1, 1), _
+        LookIn:=xlFormulas, _
+        LookAt:=xlPart, _
+        SearchOrder:=xlByRows, _
+        SearchDirection:=xlPrevious, _
+        MatchCase:=False)
+
+    If foundCell Is Nothing Then
+        GetLastUsedRow = 1
+    Else
+        GetLastUsedRow = foundCell.Row
+    End If
+End Function
+
+Private Function GetLastUsedColumn(ByVal ws As Worksheet) As Long
+
+    Dim foundCell As Range
+
+    Set foundCell = ws.Cells.Find( _
+        What:="*", _
+        After:=ws.Cells(1, 1), _
+        LookIn:=xlFormulas, _
+        LookAt:=xlPart, _
+        SearchOrder:=xlByColumns, _
+        SearchDirection:=xlPrevious, _
+        MatchCase:=False)
+
+    If foundCell Is Nothing Then
+        GetLastUsedColumn = 0
+    Else
+        GetLastUsedColumn = foundCell.Column
+    End If
+End Function
+
+'-------------------------------------------------------------
+' GET OR CREATE A WORKSHEET
+'-------------------------------------------------------------
+Private Function GetWorksheet(ByVal wb As Workbook, _
+                              ByVal sheetName As String) As Worksheet
+
+    On Error Resume Next
+    Set GetWorksheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+End Function
+
+Private Function GetOrCreateWorksheet(ByVal wb As Workbook, _
+                                      ByVal sheetName As String) As Worksheet
+
+    Dim ws As Worksheet
+
+    Set ws = GetWorksheet(wb, sheetName)
+
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = sheetName
+    End If
+
+    Set GetOrCreateWorksheet = ws
+End Function
+
+'-------------------------------------------------------------
+' LIMIT EXCESSIVELY WIDE COLUMNS AFTER AUTOFIT
+'-------------------------------------------------------------
+Private Sub CapPivotColumnWidths(ByVal ws As Worksheet, _
+                                 ByVal maxWidth As Double)
+
+    Dim lastCol As Long
+    Dim c As Long
+
+    lastCol = GetLastUsedColumn(ws)
+
+    For c = 1 To lastCol
+        ws.Columns(c).AutoFit
+        If ws.Columns(c).ColumnWidth > maxWidth Then
+            ws.Columns(c).ColumnWidth = maxWidth
+        End If
+    Next c
+End Sub
+
+'-------------------------------------------------------------
+' ADD / RECREATE A BUTTON ON DATASET TO RUN THE PIVOT MACRO
+' Run this macro once to create the button.
+'-------------------------------------------------------------
+Public Sub AddSalesPivotButton()
+
+    Dim wsData As Worksheet
+    Dim lastCol As Long
+    Dim btn As Button
+    Dim i As Long
+
+    Set wsData = GetWorksheet(ThisWorkbook, DATA_SHEET)
+
+    If wsData Is Nothing Then
+        MsgBox "Worksheet '" & DATA_SHEET & "' was not found.", vbCritical
+        Exit Sub
+    End If
+
+    lastCol = GetLastUsedColumn(wsData)
+
+    ' Delete only the button previously created by this module.
+    For i = wsData.Shapes.Count To 1 Step -1
+        If wsData.Shapes(i).Name = "btnCreateSalesPivotTables" Then
+            wsData.Shapes(i).Delete
+        End If
+    Next i
+
+    ' Place the button to the right of the existing dataset.
+    Set btn = wsData.Buttons.Add( _
+        Left:=wsData.Cells(1, lastCol + 2).Left, _
+        Top:=wsData.Cells(1, 1).Top, _
+        Width:=190, _
+        Height:=30)
+
+    With btn
+        .Name = "btnCreateSalesPivotTables"
+        .Caption = "Create / Refresh PivotTables"
+        .OnAction = "'" & ThisWorkbook.Name & "'!CreateSalesPivotTables"
+    End With
+
+    MsgBox "PivotTable button added to the Dataset worksheet.", _
+           vbInformation, "Button Created"
+End Sub
+
+'-------------------------------------------------------------
+' RESTORE EXCEL APPLICATION SETTINGS
+'-------------------------------------------------------------
+Private Sub RestoreApplicationSettings(ByVal screenUpdating As Boolean, _
+                                       ByVal enableEvents As Boolean, _
+                                       ByVal displayAlerts As Boolean, _
+                                       ByVal calculation As XlCalculation)
+
+    Application.ScreenUpdating = screenUpdating
+    Application.EnableEvents = enableEvents
+    Application.DisplayAlerts = displayAlerts
+    Application.Calculation = calculation
+End Sub
