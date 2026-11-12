@@ -1,5 +1,7 @@
 # Excel VBA Automation – Sales Data Formatting, PivotTables & Dashboard
 
+![Excel VBA Automation](Video Project.mp4)
+
 An Excel 2024 VBA automation project that turns a raw sales dataset into a structured, formatted analysis workbook with automatically generated PivotTables and a refreshable sales dashboard.
 
 The project is designed to reduce repetitive Excel work: format the source data, build summary analyses, and generate a dashboard from the summaries using VBA macros and buttons.
